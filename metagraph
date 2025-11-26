@@ -1,0 +1,124 @@
+#installing metagraph
+conda install -c bioconda -c conda-forge metagraph
+
+#this builds and annotates a database from .fasta and .fastq files
+DATA="../tests/data/transcripts_1000.fa"
+./metagraph build -k 12 -o transcripts_1000 $DATA
+./metagraph annotate -i transcripts_1000.dbg --anno-filename -o transcripts_1000 $DATA
+./metagraph query -i transcripts_1000.dbg -a transcripts_1000.column.annodbg $DATA
+./metagraph stats -a transcripts_1000.column.annodbg transcripts_1000.dbg
+
+
+#attempted to combine multiple files from different directories into a single database
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Usage:
+# ./build_metagraph_from_dirs.sh /path/to/root_dir /path/to/out_dir -k 20 --threads 16 --mem 64 --tmp /scratch/tmp_merge.gz
+#
+# Minimal:
+# ./build_metagraph_from_dirs.sh /data/sequences /out/graphdir
+
+ROOT_DIR="${1:-}"
+OUT_DIR="${2:-}"
+shift 2 || true
+
+if [[ -z "$ROOT_DIR" || -z "$OUT_DIR" ]]; then
+  echo "Usage: $0 <root_dir> <out_dir> [metagraph options]"
+  echo "Example: $0 /data/sequences /out/graph -k 20 --threads 16 --mem 64"
+  exit 1
+fi
+
+# Default meta options
+K=20
+THREADS=8
+MEM_GB=16
+TMP_MERGE="${TMPDIR:-/tmp}/metagraph_merged.fa.gz"
+
+# parse additional args (simple)
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -k) K="$2"; shift 2;;
+    --k) K="$2"; shift 2;;
+    --threads|-t) THREADS="$2"; shift 2;;
+    --mem|--mem-cap-gb) MEM_GB="$2"; shift 2;;
+    --tmp) TMP_MERGE="$2"; shift 2;;
+    *) EXTRA_ARGS+=("$1"); shift ;;
+  esac
+done
+
+EXTRA_ARGS=${EXTRA_ARGS:-()}
+
+echo "Root:    $ROOT_DIR"
+echo "Out dir: $OUT_DIR"
+echo "k:       $K"
+echo "threads: $THREADS"
+echo "mem_gb:  $MEM_GB"
+echo "tmp:     $TMP_MERGE"
+echo "extra metagraph args: ${EXTRA_ARGS[*]}"
+
+mkdir -p "$OUT_DIR"
+mkdir -p "$(dirname "$TMP_MERGE")"
+
+# find sequence files (gz or plain)
+echo "Finding sequence files..."
+mapfile -t FILES < <(find "$ROOT_DIR" -type f \( \
+  -iname '*.fa' -o -iname '*.fasta' -o -iname '*.fna' -o -iname '*.faa' -o \
+  -iname '*.fq' -o -iname '*.fastq' -o \
+  -iname '*.fa.gz' -o -iname '*.fasta.gz' -o -iname '*.fna.gz' -o -iname '*.faa.gz' -o \
+  -iname '*.fq.gz' -o -iname '*.fastq.gz' \) -print)
+
+if [[ ${#FILES[@]} -eq 0 ]]; then
+  echo "No fasta/fastq files found under $ROOT_DIR"
+  exit 2
+fi
+
+echo "Found ${#FILES[@]} files. Example files:"
+for f in "${FILES[@]:0:5}"; do echo "  $f"; done
+
+# Warn about paired-end naming patterns
+if find "$ROOT_DIR" -type f -iname '*_R1.*' -o -iname '*_1.*' | grep -q .; then
+  echo "WARNING: Your directory contains files that look like paired-end reads (e.g. *_R1*, *_R2* or *_1.*, *_2.*)."
+  echo "Concatenating all files into one stream will mix reads from R1/R2 and may break pairing-dependent workflows."
+  echo "If you need to preserve pairing semantics, consider building separate graphs or provide ordered lists per pair."
+fi
+
+# Estimate size
+total_bytes=0
+for f in "${FILES[@]}"; do
+  total_bytes=$(( total_bytes + $(stat -c%s "$f") ))
+done
+total_gb=$(awk "BEGIN{printf \"%.1f\", $total_bytes/1024/1024/1024}")
+echo "Total size of input files: ${total_gb} GB"
+
+echo "Merging files into single gzip stream at: $TMP_MERGE"
+# Remove existing tmp if any
+rm -f "$TMP_MERGE"
+
+# Create merged gz stream. This handles both gzipped and plain files.
+# Implementation: for each file, if gzipped -> zcat, else cat. Pipe to gzip to produce a single gz file.
+(
+  for f in "${FILES[@]}"; do
+    if [[ "$f" == *.gz ]]; then
+      echo "Merging (gz): $f" >&2
+      zcat -- "$f"
+    else
+      echo "Merging: $f" >&2
+      cat -- "$f"
+    fi
+  done
+) | gzip -c > "$TMP_MERGE"
+
+echo "Merged file created: $TMP_MERGE (size $(stat -c%s "$TMP_MERGE") bytes)"
+
+# Now run metagraph build on the merged file.
+# You can tweak mem/threads/k and other metagraph flags below.
+METAGRAPH_BIN="${METAGRAPH_BIN:-metagraph}"   # override with env var if needed
+GRAPH_OUT="${OUT_DIR}/graph"
+
+echo "Running: $METAGRAPH_BIN build -v --parallel ${THREADS} -k ${K} --mem-cap-gb ${MEM_GB} -o ${GRAPH_OUT} ${TMP_MERGE} ${EXTRA_ARGS[*]}"
+# Execute
+$METAGRAPH_BIN build -v --parallel "${THREADS}" -k "${K}" --mem-cap-gb "${MEM_GB}" -o "${GRAPH_OUT}" "${TMP_MERGE}" "${EXTRA_ARGS[@]}"
+
+echo "MetaGraph build finished. Graph directory: ${GRAPH_OUT}"
+echo "You can now annotate: metagraph annotate -i ${GRAPH_OUT}.dbg --anno-filename -o ${OUT_DIR} ${TMP_MERGE}"
