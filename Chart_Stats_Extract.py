@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 # Initialize API
-API_KEY = 'ENTER_API_KEY'
+API_KEY = 'ENTER_API_KEY' #Enter your Alphagenome API key here
 model = dna_client.create(API_KEY)
 
 # Define your interval and variant
