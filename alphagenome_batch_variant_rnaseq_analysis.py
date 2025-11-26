@@ -169,7 +169,7 @@ class VariantAnalyzer:
 
 
 # Usage example
-API_KEY = 'YOUR_API_KEY' #Enter your Alphagenome API key here
+API_KEY = 'ENTER_API_KEY' #Enter your Alphagenome API key here
 analyzer = VariantAnalyzer(API_KEY)
 
 # Process variants from file
